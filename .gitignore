@@ -1,0 +1,11 @@
+# build output
+/bin/
+/dist/
+/obj/
+*.user
+*.suo
+.vs/
+
+# runtime state (created next to the exe at runtime)
+mimas.log
+mimas.config.json
