@@ -105,6 +105,64 @@ The downloaded binary was then run standalone (fresh empty directory) and
 re-verified against the relay: it created `mimas.config.json` on first launch,
 started listening, and returned `Red.` for the nested-image vision test.
 
+## 8. Live end-to-end run (2026-11-04, after install)
+
+Mimas 1.0.0 installed to `%LOCALAPPDATA%\Mimas\`, `mode: always`, real ZCode
+provider config pointed at `http://127.0.0.1:8817`.
+
+### 8a. Size sweep, raw relay A/B
+
+Same request twice — image nested in `tool_result.content` vs hoisted as a
+sibling block — against the relay directly, no proxy involved. Image is a
+rendered 6-character code; the question is "what code is written in the image".
+
+| file | bytes | nested `input_tokens` | hoisted `input_tokens` | ratio | nested answer | hoisted answer |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| `sweep_128.png` | 3,538 | 3,479 | 454 | 7.7× | *"I can't determine the code…"* | `K3` |
+| `sweep_320.png` | 6,648 | 6,037 | 454 | 13.3× | *"The"* | `R7` |
+| `sweep_640.png` | 23,756 | 21,206 | 766 | 27.7× | *(empty)* | `M4X` |
+| `sweep_900.png` | 49,842 | 44,443 | 1,222 | 36.4× | *"does not contain any…"* | `PWZ9BQ` |
+
+Two things to read off this: the hoisted cost tracks the image's *pixel*
+content (~450–1,200 tokens), while the nested cost tracks its *base64 length*,
+so the ratio grows with file size. And the nested form never once produced the
+right answer.
+
+### 8b. Real ZCode conversation, proxied vs direct
+
+`zcode -p "…tell me the 6-character code written in code900.png…" --mode yolo`,
+run once with the provider pointing at Mimas and once straight at the relay.
+
+| | through Mimas | direct to relay |
+| --- | ---: | ---: |
+| API calls in the run | **2** | 21 |
+| Σ `input_tokens` | **23,764** | 3,047,623 |
+| Σ `cache_read_input_tokens` | 12,288 | 2,424,192 |
+| `Bash` calls | **0** | 16 |
+| wall clock | ~30 s | >7 min (timed out of the foreground call) |
+| answer | `PWZ9BQ` ✅ | `PWZ9BQ` ✅ (after OCR-ing the file itself with Python) |
+
+The direct run "succeeded" only because the model, unable to see the image,
+fell back to writing Python to decode and OCR the PNG byte by byte — 16 Bash
+calls, 19 extra model round-trips, and ~3M tokens. Through Mimas it read the
+code off the image in one shot.
+
+The same A/B on `big1600.png` (1.1 MB of pixel noise):
+
+| | through Mimas | direct to relay |
+| --- | ---: | ---: |
+| calls | 2 | 20 |
+| peak single-request `input_tokens` | **18,161** | 404,194 |
+| answer | "uniform field of fine olive-green noise" | same, after multi-scale image analysis |
+
+### 8c. Desktop app note
+
+The ZCode desktop app reads `provider_config.json` once per app-server process
+(`watch: false` in the bundled runtime). Changing `baseUrl` therefore has no
+effect on an already-running window — the app must be restarted. Confirmed:
+requests from a desktop session started before the change still went straight
+to the relay (no `hoisted` lines in `mimas.log`) for 20+ turns after the edit.
+
 ## What was NOT verified
 
 - Relays other than the one tested. The rewriter is shape-based, not
