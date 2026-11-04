@@ -81,6 +81,7 @@ a user message. Putting an image between two `tool_result` blocks returns
 | Multi-turn, image kept in history | 8,918 / turn | 1,083 / turn | 8× cheaper per turn |
 
 The token numbers come from the upstream's own `usage.input_tokens`.
+Full method and raw numbers: [docs/VERIFICATION.md](docs/VERIFICATION.md).
 
 ### What it deliberately does not do
 
