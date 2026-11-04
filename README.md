@@ -5,6 +5,11 @@ billed as text.
 
 Named after **Mimas**, a moon of Saturn.
 
+> **Using an AI agent?** Point it at [AI-INSTALL.md](AI-INSTALL.md). That file
+> is written as literal instructions for an assistant: verify the bug, download
+> and checksum the binary, write the config, repoint the provider, and confirm
+> the rewrite is actually in the request path.
+
 ---
 
 ## The bug
