@@ -14,6 +14,12 @@ namespace Mimas
         public List<string> WatchProcesses = new List<string> { "ZCode" };
         public bool StartWithWindows = false;
         public bool Verbose = false;
+        public bool SetupCompleted = false;     // first-run wizard dismissed
+
+        // True when the config file already carried a "setupCompleted" key.
+        // An old install (v1.0.0) has no such key and must not be treated as
+        // an unfinished setup.
+        public bool HasSetupFlag = false;
 
         public static string ExePath { get { return Assembly.GetExecutingAssembly().Location; } }
         public static string ExeDir { get { return Path.GetDirectoryName(ExePath); } }
@@ -62,6 +68,13 @@ namespace Mimas
 
                 v = n.Get("verbose");
                 if (v != null && v.Kind == JKind.Bool) cfg.Verbose = v.BoolValue;
+
+                v = n.Get("setupCompleted");
+                if (v != null && v.Kind == JKind.Bool)
+                {
+                    cfg.HasSetupFlag = true;
+                    cfg.SetupCompleted = v.BoolValue;
+                }
             }
             catch { }
 
@@ -81,6 +94,7 @@ namespace Mimas
             n.Set("watchProcesses", arr);
             n.Set("startWithWindows", JNode.NewBool(StartWithWindows));
             n.Set("verbose", JNode.NewBool(Verbose));
+            n.Set("setupCompleted", JNode.NewBool(SetupCompleted));
 
             File.WriteAllText(ConfigPath, PrettyPrint(Json.Serialize(n)));
         }

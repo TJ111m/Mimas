@@ -20,8 +20,21 @@ if not exist "%ROOT%\bin" mkdir "%ROOT%\bin"
   -r:System.Core.dll ^
   -r:System.Drawing.dll ^
   -r:System.Windows.Forms.dll ^
-  "%ROOT%\src\Json.cs" "%ROOT%\src\Rewriter.cs" "%ROOT%\src\ProxyServer.cs" ^
-  "%ROOT%\src\AppConfig.cs" "%ROOT%\src\ProcessWatcher.cs" "%ROOT%\src\Program.cs"
+  "%ROOT%\src\Json.cs" ^
+  "%ROOT%\src\Rewriter.cs" ^
+  "%ROOT%\src\AppConfig.cs" ^
+  "%ROOT%\src\ProcessWatcher.cs" ^
+  "%ROOT%\src\LogHub.cs" ^
+  "%ROOT%\src\ProxyServer.cs" ^
+  "%ROOT%\src\AppHost.cs" ^
+  "%ROOT%\src\AgentIntegration.cs" ^
+  "%ROOT%\src\Diagnostics.cs" ^
+  "%ROOT%\src\Ui\Theme.cs" ^
+  "%ROOT%\src\Ui\Controls.cs" ^
+  "%ROOT%\src\Ui\LiveLogView.cs" ^
+  "%ROOT%\src\Ui\MainForm.cs" ^
+  "%ROOT%\src\Ui\SetupWizard.cs" ^
+  "%ROOT%\src\Program.cs"
 
 if errorlevel 1 (
   echo [!] build failed

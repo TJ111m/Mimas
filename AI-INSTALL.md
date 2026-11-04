@@ -13,17 +13,19 @@ If you are a human, read [README.md](README.md) instead.
 
 ```yaml
 name: Mimas
-version: 1.0.0
+version: 1.1.0
 platform: windows
 requires_admin: false
 artifact:
-  url: https://github.com/TJ111m/Mimas/releases/download/v1.0.0/Mimas.exe
-  sha256: 9a4776c511adf1da05a02826ae95d35b6f56a85342ebec7d1ed4387944bc8990
-  size_bytes: 308736
+  url: https://github.com/TJ111m/Mimas/releases/download/v1.1.0/Mimas.exe
+  sha256: e5dbad473c941f8ae993b1cb3427532dfe752938881e403973ef063de3b75d7f
+  size_bytes: 370176
 install_dir: "%LOCALAPPDATA%\\Mimas"
 default_port: 8817
 local_base_url: http://127.0.0.1:8817
 listens_on: 127.0.0.1 only
+gui: true
+headless_flags: ["--no-wizard"]
 ```
 
 ---
@@ -34,6 +36,11 @@ A loopback-only HTTP proxy. It rewrites one thing in outgoing Anthropic
 Messages API requests: `image` / `document` blocks nested inside
 `tool_result.content` are hoisted into sibling content blocks. That is the
 whole program. It does not touch responses, keys, or text-only requests.
+
+Since 1.1.0 it also has a GUI (a tray icon plus a 980×660 window with five
+pages), a first-run setup wizard, and a live per-call log. **You do not need the
+GUI to install it** — everything below is config-file and command-line work.
+Launching the exe with `--no-wizard` keeps it headless even on a fresh machine.
 
 It is only useful if the user's relay **stringifies** `tool_result.content`.
 Step 0 checks that. If the check fails, stop and tell the user Mimas is not
@@ -91,14 +98,14 @@ means the relay is fine, whatever the token counts say.
 
 ```cmd
 mkdir "%LOCALAPPDATA%\Mimas" 2>nul
-curl -L -o "%LOCALAPPDATA%\Mimas\Mimas.exe" https://github.com/TJ111m/Mimas/releases/download/v1.0.0/Mimas.exe
+curl -L -o "%LOCALAPPDATA%\Mimas\Mimas.exe" https://github.com/TJ111m/Mimas/releases/download/v1.1.0/Mimas.exe
 certutil -hashfile "%LOCALAPPDATA%\Mimas\Mimas.exe" SHA256
 ```
 
 Expected hash, lowercase:
 
 ```
-9a4776c511adf1da05a02826ae95d35b6f56a85342ebec7d1ed4387944bc8990
+e5dbad473c941f8ae993b1cb3427532dfe752938881e403973ef063de3b75d7f
 ```
 
 **If it does not match, delete the file and stop.** Do not run an unverified
@@ -117,7 +124,8 @@ Create `%LOCALAPPDATA%\Mimas\mimas.config.json` **before** first launch:
   "mode": "always",
   "watchProcesses": ["ZCode"],
   "startWithWindows": true,
-  "verbose": false
+  "verbose": false,
+  "setupCompleted": true
 }
 ```
 
@@ -132,13 +140,17 @@ Field rules:
   `watchProcesses` is running. Use `watch` if the user objects to a permanent
   background process.
 - `startWithWindows` — `true` adds an `HKCU\...\Run` entry. No admin needed.
+- `setupCompleted` — **write this key.** It is the flag the first-run wizard
+  checks. Without it, 1.1.0 shows the wizard on launch and waits for a human,
+  which stalls an unattended install. (1.0.0 configs lack the key and are
+  auto-marked, but a config *you* write should say `true` outright.)
 
 ---
 
 ## Step 3 — start it and verify
 
 ```cmd
-start "" "%LOCALAPPDATA%\Mimas\Mimas.exe"
+start "" "%LOCALAPPDATA%\Mimas\Mimas.exe" --no-wizard
 ```
 
 Wait 3 seconds, then:
@@ -157,14 +169,21 @@ type "%LOCALAPPDATA%\Mimas\mimas.log"
 Expected tail:
 
 ```
-Mimas 1.0.0 starting
-upstream=<the user's relay> port=8817 mode=always
-listening on http://127.0.0.1:8817 -> <the user's relay>
-proxy started
+2026-11-04 16:00:58  Mimas 1.1.0 starting
+2026-11-04 16:00:58  upstream=<the user's relay> port=8817 mode=always
+2026-11-04 16:00:58  listening on http://127.0.0.1:8817 -> <the user's relay>
 ```
 
-There is **no window**. On Windows 10/11 the icon appears in the tray. That is
-correct — do not tell the user the app failed because nothing opened.
+The first two lines are written on every launch. The `listening on …` line is
+what proves the port is actually bound — in `watch` mode it appears only after
+`watched process appeared -> starting proxy`, i.e. once the agent launches.
+If you see the first two lines but no `listening` line, the listener failed
+to bind; look for a `proxy failed to start:` line right after it.
+
+With `--no-wizard` there is **no window** — only the tray icon. That is
+correct; do not tell the user the app failed because nothing opened. (Without
+the flag, 1.1.0 opens a setup wizard on a fresh install. If you wrote
+`setupCompleted: true` in Step 2, it will not.)
 
 Smoke test the proxy without involving any agent:
 
@@ -215,26 +234,41 @@ Point its base URL at `http://127.0.0.1:8817`. Keep the real key and the
 
 ## Step 5 — verify the fix is actually in the path
 
+Since 1.1.0 **every** request produces exactly one line, whether or not it was
+rewritten:
+
+```
+2026-11-04 16:01:07  POST /v1/messages  200  1841ms  in=71.3KB out=1.2KB  hoisted=1  claude-sonnet-5-5
+2026-11-04 16:01:09  POST /v1/messages  200   903ms  in=12.4KB out=0.4KB  claude-sonnet-5-5
+2026-11-04 16:01:11  POST /v1/messages  401   122ms  in=1.2KB out=0.1KB
+```
+
+Format: `method path  status  latency  in=<size> out=<size>` then `hoisted=N`
+only when the body was rewritten, then the model name when it could be read
+from the body. Rewrites additionally emit their byte delta on the next line:
+
+```
+2026-11-04 16:01:07  hoisted 1 block(s): 85781 -> 85854 bytes
+```
+
 Make the agent read an image (ask it to `Read` a PNG), then:
 
 ```cmd
 type "%LOCALAPPDATA%\Mimas\mimas.log"
 ```
 
-A new line like this must appear:
+| What you see | Meaning | Action |
+| --- | --- | --- |
+| a line with `hoisted=1` (or more) | traffic flows through Mimas and was rewritten | confirm the agent answered the image correctly |
+| `POST /v1/messages` lines but never `hoisted=` | traffic reaches Mimas, but no `tool_result` carried an image — wrong request, or the tool result was text-only | check the agent actually read a file |
+| no new lines at all | traffic is bypassing Mimas | the agent was not restarted, you edited the wrong config file, or another provider entry takes precedence |
 
-```
-2026-11-04 16:01:07  hoisted 1 block(s): 85781 -> 85854 bytes
-```
+An empty log is also normal if the agent has not sent a request yet. If the log
+file does not exist, Mimas never started — go back to Step 3.
 
-- **Line appears** → traffic is flowing through Mimas and being rewritten.
-  Then confirm the agent answered the image correctly.
-- **No line appears** → traffic is still bypassing Mimas. The agent was not
-  restarted, or you edited the wrong config file, or a second provider entry is
-  taking precedence. Fix that before reporting success.
-
-Bodies without a `tool_result` are never logged, so a text-only conversation
-producing no log lines is normal.
+The same lines appear live in the **日志** page of the GUI, colour-coded
+(amber = rewritten, red = error). If the user has the window open, ask them to
+read the last row rather than tailing the file.
 
 ---
 
@@ -248,8 +282,31 @@ State plainly:
 - that the agent had to be restarted, and whether the user did it
 - that `mimas.log` and `mimas.config.json` live next to the exe
 
-Do not claim the bug is fixed unless Step 5's `hoisted` line appeared **and**
+Do not claim the bug is fixed unless Step 5's `hoisted=` line appeared **and**
 the agent answered an image question correctly.
+
+---
+
+## The GUI (only if the user wants it)
+
+Everything above works without ever opening the window. If the user asks for
+"the settings window", "the UI", or wants to configure things by hand, tell them:
+
+- Double-click the tray icon, or right-click it → **打开设置…**.
+- **概览** shows live counters and start/stop/restart.
+- **上游** edits the relay URL, port, run mode and watched processes, and has
+  **测试上游** / **测试本地端口** buttons that do a real TCP (and TLS)
+  connection plus a full end-to-end POST.
+- **Agent** points ZCode's `provider_config.json` (or Claude Code's
+  `ANTHROPIC_BASE_URL`) at Mimas with one click, and restores it again. It
+  writes a `.bak-before-mimas` backup on first use — the same thing Step 4 does
+  by hand.
+- **日志** is the live tail described in Step 5.
+- Flags: `--ui` opens the window at startup, `--no-tray` runs window-only,
+  `--no-wizard` never shows the first-run wizard.
+
+Do not launch the GUI during an unattended install. It is a tray-only process
+by default; a window appearing is not required for anything in Steps 0–6.
 
 ---
 

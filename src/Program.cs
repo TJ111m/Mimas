@@ -1,34 +1,36 @@
 // Mimas - tray app entry point.
 //
-// Mimas is a moon of Saturn: it sits quietly in orbit around your agent and
-// never shows a window. There is no main form; the process runs a tray icon
-// plus a background HTTP proxy.
+// Mimas is a moon of Saturn: it sits quietly in orbit around your agent. It
+// runs a tray icon plus a background HTTP proxy, and shows a window only when
+// asked (tray double-click, or --ui on the command line).
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.IO;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
-using Microsoft.Win32;
 
 namespace Mimas
 {
     static class Program
     {
         public const string AppName = "Mimas";
-        public const string AppVersion = "1.0.0";
+        public const string AppVersion = "1.1.0";
 
         [STAThread]
         static void Main(string[] args)
         {
             bool noTray = false;
+            bool forceUi = false;
+            bool noWizard = false;
+
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i].ToLowerInvariant();
                 if (a == "--no-tray" || a == "/no-tray" || a == "-notray") noTray = true;
+                else if (a == "--ui" || a == "/ui" || a == "-ui") forceUi = true;
+                else if (a == "--no-wizard" || a == "/no-wizard") noWizard = true;
             }
 
             bool first;
@@ -36,123 +38,176 @@ namespace Mimas
             {
                 if (!first)
                 {
-                    // Already running; do not start a second listener.
+                    // Already running. A second launch means "show me the window",
+                    // which is what double-clicking the exe should do.
+                    SignalExistingInstance();
                     return;
                 }
 
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new MimasContext(noTray));
+                Application.Run(new MimasContext(noTray, forceUi, noWizard));
             }
         }
+
+        // ---------- single-instance activation ----------
+
+        const int HWND_BROADCAST = 0xFFFF;
+        static readonly int WM_MIMAS_SHOW = RegisterWindowMessage("Mimas-Show-Window");
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        static extern int RegisterWindowMessage(string message);
+
+        [DllImport("user32.dll")]
+        static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        static void SignalExistingInstance()
+        {
+            try { PostMessage((IntPtr)HWND_BROADCAST, WM_MIMAS_SHOW, IntPtr.Zero, IntPtr.Zero); }
+            catch { }
+        }
+
+        public static int ShowMessageId { get { return WM_MIMAS_SHOW; } }
     }
 
     sealed class MimasContext : ApplicationContext
     {
-        readonly AppConfig _cfg;
-        readonly ProxyServer _proxy;
-        readonly ProcessWatcher _watcher;
+        readonly AppHost _host;
         readonly List<NotifyIcon> _icons = new List<NotifyIcon>();
-        readonly object _logLock = new object();
         readonly bool _noTray;
+        readonly bool _forceUi;
+        readonly bool _noWizard;
 
+        MainForm _window;
         ToolStripMenuItem _statusItem;
         ToolStripMenuItem _modeItem;
         ToolStripMenuItem _startupItem;
         ToolStripMenuItem _upstreamItem;
         ToolStripMenuItem _portItem;
 
-        bool _proxyRunning;
+        NativeWindow _messageSink;
 
-        public MimasContext(bool noTray)
+        public MimasContext(bool noTray, bool forceUi, bool noWizard)
         {
             _noTray = noTray;
-            _cfg = AppConfig.Load();
+            _forceUi = forceUi;
+            _noWizard = noWizard;
 
-            _proxy = new ProxyServer(_cfg.Upstream, _cfg.Port, Log);
-            _watcher = new ProcessWatcher(_cfg.WatchProcesses, 3000, OnWatchChanged);
-
-            Log("Mimas " + Program.AppVersion + " starting");
-            Log("upstream=" + _cfg.Upstream + " port=" + _cfg.Port + " mode=" + _cfg.Mode);
+            _host = new AppHost(new LogHub());
+            _host.Start();
 
             if (!_noTray) BuildTray();
+            BuildMessageSink();
 
-            if (_cfg.Mode == "watch")
-            {
-                _watcher.Start();
-            }
-            else
-            {
-                StartProxy();
-            }
+            bool firstRun = _host.IsFirstRun;
 
-            if (_cfg.StartWithWindows) EnsureStartupEntry(true);
+            if (forceUi || (firstRun && !noWizard && !noTray))
+            {
+                // Defer until the message loop is running so the tray icon is
+                // already visible behind the dialog.
+                Application.Idle += ShowOnFirstIdle;
+            }
         }
 
-        // ---------- proxy lifecycle ----------
-
-        void StartProxy()
+        void ShowOnFirstIdle(object sender, EventArgs e)
         {
-            if (_proxyRunning) return;
-            try
-            {
-                _proxy.Start();
-                _proxyRunning = true;
-                Log("proxy started");
-            }
-            catch (Exception ex)
-            {
-                _proxyRunning = false;
-                Log("proxy failed to start: " + ex.Message);
-            }
-            UpdateStatus();
+            Application.Idle -= ShowOnFirstIdle;
+            if (_host.IsFirstRun && !_noWizard) ShowWizard();
+            else ShowWindow();
         }
 
-        void StopProxy()
+        // ---------- window ----------
+
+        public void ShowWindow()
         {
-            if (!_proxyRunning) return;
-            try { _proxy.Stop(); } catch { }
-            _proxyRunning = false;
-            Log("proxy stopped");
-            UpdateStatus();
+            if (_window == null || _window.IsDisposed)
+            {
+                _window = new MainForm(_host);
+                _window.FormClosed += delegate { _window = null; };
+            }
+
+            if (!_window.Visible) _window.Show();
+            if (_window.WindowState == FormWindowState.Minimized)
+                _window.WindowState = FormWindowState.Normal;
+
+            _window.Activate();
+            _window.BringToFront();
+            _host.Raise();
         }
 
-        void OnWatchChanged(bool alive)
+        public void ShowWizard()
         {
-            Log(alive ? "watched process appeared -> starting proxy" : "watched process gone -> stopping proxy");
-            if (alive) StartProxy();
-            else StopProxy();
+            using (SetupWizard w = new SetupWizard(_host))
+            {
+                DialogResult r = w.ShowDialog();
+                if (r == DialogResult.OK) ShowWindow();
+            }
+        }
+
+        // ---------- single-instance message ----------
+
+        void BuildMessageSink()
+        {
+            _messageSink = new MessageSink(delegate { ShowWindow(); });
+        }
+
+        // A NativeWindow subclass is required: WndProc is protected, so it cannot
+        // be replaced with a delegate from outside the class.
+        sealed class MessageSink : NativeWindow
+        {
+            readonly Action _onShow;
+
+            public MessageSink(Action onShow)
+            {
+                _onShow = onShow;
+                CreateHandle(new CreateParams());
+            }
+
+            protected override void WndProc(ref Message m)
+            {
+                if (m.Msg == Program.ShowMessageId)
+                {
+                    try { _onShow(); } catch { }
+                    return;
+                }
+                base.WndProc(ref m);
+            }
         }
 
         // ---------- tray ----------
 
         void BuildTray()
         {
-            Icon icon = MakeIcon();
+            Icon icon = TrayIcon();
             ContextMenuStrip menu = new ContextMenuStrip();
 
             _statusItem = new ToolStripMenuItem("状态：启动中…") { Enabled = false };
-            _modeItem = new ToolStripMenuItem("运行方式", null,
-                (s, e) => ToggleMode());
-            _upstreamItem = new ToolStripMenuItem("上游：" + _cfg.Upstream) { Enabled = false };
-            _portItem = new ToolStripMenuItem("本地端口：" + _cfg.Port) { Enabled = false };
+            _modeItem = new ToolStripMenuItem("运行方式", null, delegate { ToggleMode(); });
+            _upstreamItem = new ToolStripMenuItem("上游：") { Enabled = false };
+            _portItem = new ToolStripMenuItem("本地端口：") { Enabled = false };
+
+            ToolStripMenuItem openUi = new ToolStripMenuItem("打开设置…", null, delegate { ShowWindow(); });
+            openUi.Font = new Font(openUi.Font, FontStyle.Bold);
+
+            ToolStripMenuItem restart = new ToolStripMenuItem("重启代理", null, delegate
+            {
+                string err = _host.RestartProxy();
+                if (err != null) _statusItem.Text = "状态：" + err;
+            });
 
             ToolStripMenuItem openConfig = new ToolStripMenuItem("打开配置文件…", null,
-                (s, e) => OpenPath(AppConfig.ConfigPath));
+                delegate { OpenPath(AppConfig.ConfigPath); });
             ToolStripMenuItem openLog = new ToolStripMenuItem("查看日志…", null,
-                (s, e) => OpenPath(AppConfig.LogPath));
+                delegate { OpenPath(AppConfig.LogPath); });
 
-            _startupItem = new ToolStripMenuItem("开机自启动", null,
-                (s, e) => ToggleStartup());
-            _startupItem.Checked = _cfg.StartWithWindows;
+            _startupItem = new ToolStripMenuItem("开机自启动", null, delegate { ToggleStartup(); });
+            _startupItem.Checked = _host.Config.StartWithWindows;
 
-            ToolStripMenuItem restart = new ToolStripMenuItem("重启代理", null,
-                (s, e) => { StopProxy(); StartProxy(); });
-            ToolStripMenuItem quit = new ToolStripMenuItem("退出", null,
-                (s, e) => Quit());
+            ToolStripMenuItem quit = new ToolStripMenuItem("退出", null, delegate { Quit(); });
 
             menu.Items.Add(_statusItem);
             menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(openUi);
             menu.Items.Add(_modeItem);
             menu.Items.Add(_upstreamItem);
             menu.Items.Add(_portItem);
@@ -169,7 +224,10 @@ namespace Mimas
             tray.Text = Program.AppName;
             tray.ContextMenuStrip = menu;
             tray.Visible = true;
-            tray.MouseDoubleClick += (s, e) => OpenPath(AppConfig.LogPath);
+            tray.MouseDoubleClick += delegate(object s, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left) ShowWindow();
+            };
             _icons.Add(tray);
 
             // A second hidden icon keeps the tray entry alive across Explorer restarts.
@@ -180,28 +238,36 @@ namespace Mimas
             spare.Visible = false;
             _icons.Add(spare);
 
+            _host.StateChanged += delegate { SafeUpdateStatus(); };
             UpdateStatus();
+        }
+
+        void SafeUpdateStatus()
+        {
+            try
+            {
+                if (Application.OpenForms.Count >= 0) UpdateStatus();
+            }
+            catch { }
         }
 
         void UpdateStatus()
         {
-            string state;
-            if (_proxyRunning) state = "运行中 · 127.0.0.1:" + _cfg.Port;
-            else if (_cfg.Mode == "watch") state = "待机 · 等待 " + string.Join(", ", _cfg.WatchProcesses.ToArray());
-            else state = "未运行";
+            string state = _host.StatusText;
 
             if (_statusItem != null) _statusItem.Text = "状态：" + state;
             if (_modeItem != null)
             {
-                _modeItem.Text = _cfg.Mode == "watch"
-                    ? "运行方式：跟随进程（" + string.Join(", ", _cfg.WatchProcesses.ToArray()) + "）"
+                _modeItem.Text = _host.Config.Mode == "watch"
+                    ? "运行方式：跟随进程（" + string.Join(", ", _host.Config.WatchProcesses.ToArray()) + "）"
                     : "运行方式：常驻";
             }
+            if (_upstreamItem != null) _upstreamItem.Text = "上游：" + _host.Config.Upstream;
+            if (_portItem != null) _portItem.Text = "本地端口：" + _host.Config.Port;
+            if (_startupItem != null) _startupItem.Checked = _host.Config.StartWithWindows;
 
             for (int i = 0; i < _icons.Count; i++)
-            {
                 _icons[i].Text = Clip(Program.AppName + " · " + state);
-            }
         }
 
         static string Clip(string s)
@@ -212,53 +278,14 @@ namespace Mimas
 
         void ToggleMode()
         {
-            if (_cfg.Mode == "always")
-            {
-                _cfg.Mode = "watch";
-                _cfg.Save();
-                _watcher.Start();
-                if (!_watcher.IsAnyAlive()) StopProxy();
-                Log("mode -> watch");
-            }
-            else
-            {
-                _cfg.Mode = "always";
-                _cfg.Save();
-                _watcher.Dispose();
-                StartProxy();
-                Log("mode -> always");
-            }
+            _host.ToggleMode();
             UpdateStatus();
         }
 
         void ToggleStartup()
         {
-            _cfg.StartWithWindows = !_cfg.StartWithWindows;
-            _cfg.Save();
-            EnsureStartupEntry(_cfg.StartWithWindows);
-            _startupItem.Checked = _cfg.StartWithWindows;
-            Log("startWithWindows -> " + _cfg.StartWithWindows);
-        }
-
-        // ---------- startup registry ----------
-
-        const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-
-        void EnsureStartupEntry(bool enable)
-        {
-            try
-            {
-                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKey, true))
-                {
-                    if (k == null) return;
-                    if (enable) k.SetValue(Program.AppName, "\"" + AppConfig.ExePath + "\"");
-                    else k.DeleteValue(Program.AppName, false);
-                }
-            }
-            catch (Exception ex)
-            {
-                Log("startup registry error: " + ex.Message);
-            }
+            _host.ToggleStartWithWindows();
+            UpdateStatus();
         }
 
         // ---------- helpers ----------
@@ -267,7 +294,7 @@ namespace Mimas
         {
             try
             {
-                if (!File.Exists(path)) File.WriteAllText(path, "");
+                if (!System.IO.File.Exists(path)) System.IO.File.WriteAllText(path, "");
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path)
                 {
                     UseShellExecute = true
@@ -276,38 +303,14 @@ namespace Mimas
             catch { }
         }
 
-        public void Log(string message)
+        static Icon TrayIcon()
         {
-            string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + message + "\r\n";
-            lock (_logLock)
-            {
-                try { File.AppendAllText(AppConfig.LogPath, line); }
-                catch { }
-            }
-        }
-
-        static Icon MakeIcon()
-        {
-            // Draw a small ringed planet; no external asset needed.
             Bitmap bmp = new Bitmap(32, 32);
             using (Graphics g = Graphics.FromImage(bmp))
             {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
+                Theme.Setup(g);
                 g.Clear(Color.Transparent);
-
-                using (SolidBrush body = new SolidBrush(Color.FromArgb(210, 214, 222)))
-                    g.FillEllipse(body, 9, 9, 14, 14);
-
-                using (SolidBrush shade = new SolidBrush(Color.FromArgb(90, 60, 70, 90)))
-                    g.FillEllipse(shade, 12, 12, 11, 11);
-
-                using (Pen ring = new Pen(Color.FromArgb(235, 190, 150), 2.2f))
-                {
-                    g.DrawEllipse(ring, 3, 12, 26, 8);
-                }
-
-                using (SolidBrush spec = new SolidBrush(Color.FromArgb(120, 255, 255, 255)))
-                    g.FillEllipse(spec, 12, 11, 4, 3);
+                Theme.DrawLogo(g, new Rectangle(0, 0, 32, 32));
             }
 
             IntPtr h = bmp.GetHicon();
@@ -328,13 +331,15 @@ namespace Mimas
 
         void Quit()
         {
-            Log("shutting down");
-            StopProxy();
-            try { _watcher.Dispose(); } catch { }
+            _host.Log.Info("shutting down");
+            try { if (_window != null) { _window.Dispose(); _window = null; } } catch { }
+            _host.Dispose();
+
             for (int i = 0; i < _icons.Count; i++)
             {
                 try { _icons[i].Visible = false; _icons[i].Dispose(); } catch { }
             }
+
             ExitThread();
         }
     }

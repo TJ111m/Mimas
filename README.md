@@ -106,8 +106,64 @@ No admin rights needed.
 
 1. Download `Mimas.exe` from [Releases](../../releases) (or build it, see below).
 2. Put it in its own folder, e.g. `%USERPROFILE%\Mimas`.
-3. Run it. A ringed-planet icon appears in the tray. There is no window.
-4. Edit `mimas.config.json` next to the exe:
+3. Run it. A ringed-planet icon appears in the tray, and on the very first run
+   a setup wizard asks three things: your relay address, when Mimas should run,
+   and which agents to point at it. You never have to hand-edit JSON.
+4. Double-click the tray icon (or right-click → **打开设置…**) to reopen the
+   window at any time.
+
+Already had a `mimas.config.json` from v1.0.0? The wizard is skipped — your
+existing config is used as-is, and the window opens on the dashboard.
+
+### The window
+
+A 980×660 dark window, five pages down the left sidebar:
+
+| Page | What it's for |
+| --- | --- |
+| **概览** | Live counters (requests, rewrites, hoisted image blocks, errors), listening address, start/stop/restart, last-call summary |
+| **上游** | Relay address, local port, run mode (`always` / `watch`), watched process list, autostart, plus **测试上游** and **测试本地端口** and a full end-to-end chain test |
+| **Agent** | Detects ZCode and Claude Code, points their `baseUrl` at Mimas (with a one-time `.bak-before-mimas` backup), and restores them |
+| **日志** | Every request as it happens — see below |
+| **关于** | Version, config/log paths, what Mimas does and doesn't touch |
+
+### Live per-call log
+
+Every request produces exactly one line, in the **日志** page and in
+`mimas.log`:
+
+```
+POST /v1/messages  200  1841ms  in=71.3KB out=1.2KB  hoisted=1  claude-sonnet-5-5
+POST /v1/messages  200   903ms  in=12.4KB out=0.4KB  claude-sonnet-5-5
+POST /v1/messages  401   122ms  in=1.2KB out=0.1KB
+```
+
+Method, path, status, latency, request and response size, the model name when
+it can be read from the body, and `hoisted=N` when the body was rewritten.
+Rewrites additionally log their byte delta
+(`hoisted 1 block(s): 71332 -> 71405 bytes`). Rows are colour-coded —
+rewrites amber, errors red, lifecycle green. The view auto-scrolls; scrolling up
+pauses the tail and shows **已暂停自动滚动 · 滚到底部继续**.
+
+The log is also kept in a 2000-entry in-memory ring so the page is instant, and
+written to disk on a background thread so the proxy never blocks on I/O.
+
+### Command line
+
+```
+Mimas.exe                 tray only, wizard on first run
+Mimas.exe --ui            open the window at startup
+Mimas.exe --no-tray       window only, no tray icon
+Mimas.exe --no-wizard     never show the first-run wizard
+```
+
+Starting a second copy brings the existing window to the front instead of
+failing.
+
+### Config file
+
+The GUI writes `mimas.config.json` next to the exe; you can still edit it by
+hand and hit **重启代理**.
 
 ```json
 {
@@ -116,14 +172,10 @@ No admin rights needed.
   "mode": "watch",
   "watchProcesses": ["ZCode"],
   "startWithWindows": true,
-  "verbose": false
+  "verbose": false,
+  "setupCompleted": true
 }
 ```
-
-5. Point your agent's provider `baseUrl` at `http://127.0.0.1:8817`.
-6. Right-click the tray icon → **重启代理** to apply config changes.
-
-### Config fields
 
 | Field | Meaning |
 | --- | --- |
@@ -131,16 +183,19 @@ No admin rights needed.
 | `port` | Local listen port. Default `8817`. |
 | `mode` | `always` = listen continuously. `watch` = only listen while one of `watchProcesses` is running. |
 | `watchProcesses` | Process names to watch in `watch` mode. `.exe` suffix optional. |
-| `startWithWindows` | Adds/removes an `HKCU\...\Run` entry. Toggle from the tray menu. |
+| `startWithWindows` | Adds/removes an `HKCU\...\Run` entry. Toggle from the GUI or the tray menu. |
 | `verbose` | Accepted for compatibility; per-request rewrites are always logged. |
+| `setupCompleted` | Set by the wizard. Missing in v1.0.0 configs, which is how an upgrade is told apart from a fresh install. |
 
 ### Tray menu
 
+- **打开设置…** — show the window (also double-click the icon)
 - **状态** — running / standby, and the local address
 - **运行方式** — switch between `always` and `watch`
-- **重启代理** — reload `mimas.config.json`
-- **打开配置文件 / 查看日志** — open `mimas.config.json` / `mimas.log`
-- **开机自启动** — toggle the Run registry entry
+- **重启代理** — stop and rebind the listener (a fresh `HttpListener` each
+  time, so this actually works — see [CHANGELOG](CHANGELOG.md))
+- **打开配置文件 / 查看日志**
+- **开机自启动**
 - **退出**
 
 ---
@@ -169,11 +224,29 @@ scripts\build.cmd
 
 Output: `bin\Mimas.exe` (~300 KB, single file, no dependencies).
 
-Run the offline rewriter tests (no network needed):
+Three offline test suites — no network needed:
 
 ```cmd
-scripts\test.cmd
+scripts\test.cmd        rem the rewriter itself (20 assertions)
+scripts\test-proxy.cmd  rem listener lifecycle, restart, per-call logging (12)
+scripts\test-agent.cmd  rem ZCode config patcher, never touches the real file (12)
 ```
+
+The UI can be rendered to PNGs without showing a window, for visual review:
+
+```cmd
+scripts\render-ui.cmd %TEMP%\mimas-ui
+```
+
+It parks each form at `(-32000, -32000)` with `ShowInTaskbar = false` and calls
+`Show()` — WinForms will not create child handles (and therefore will not paint
+child controls) for a form that was never displayed.
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
